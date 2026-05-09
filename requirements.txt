@@ -1,0 +1,5 @@
+aiogram[redis]>=3.4
+asyncpg
+sqlalchemy[asyncio]
+aiohttp
+redis
