@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, ChatJoinRequest, ReplyKeyboardMarkup, KeyboardButton, ContentType
+from aiogram.types import Message, CallbackQuery, ChatJoinRequest, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
 from sqlalchemy import text
 from services import *
@@ -10,7 +10,6 @@ from config import OWNER_ID, SUBSCRIBE_CHAT_ID, PLANS
 
 router = Router()
 
-# ---------- ПОСТОЯННАЯ КЛАВИАТУРА ----------
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="💳 Подписка")],
@@ -63,7 +62,7 @@ async def cmd_help(message: Message):
         reply_markup=main_kb
     )
 
-# ---------- АДМИНКА ----------
+# ---------- АДМИНКА (ПЕРВЫЙ ХЕНДЛЕР, ВЫШЕ ПОИСКА) ----------
 @router.message(Command("admin"))
 @router.message(F.text.lower().in_(["админ", "admin", "🔒 админ-панель"]))
 async def admin_panel(message: Message):
@@ -71,7 +70,7 @@ async def admin_panel(message: Message):
         return await message.answer("⛔ Доступ запрещён.")
     await message.answer("🔒 Админ-панель Specter Search", reply_markup=admin_menu())
 
-# ---------- ОБРАБОТЧИКИ КНОПОК АДМИНКИ ----------
+# ---------- КНОПКИ АДМИНКИ ----------
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(call: CallbackQuery):
     async with async_session() as sess:
@@ -112,7 +111,7 @@ async def admin_add(call: CallbackQuery):
 async def close_callback(call: CallbackQuery):
     await call.message.delete()
 
-# ---------- ВЫДАЧА ПОДПИСКИ ВЛАДЕЛЬЦУ (просто ID дни) ----------
+# ---------- ВЫДАЧА ПОДПИСКИ (ВЛАДЕЛЕЦ, по тексту "ID дни") ----------
 @router.message(F.from_user.id == OWNER_ID, F.text.regexp(r'^\d+\s+\d+$'))
 async def give_subscription_by_text(message: Message):
     parts = message.text.strip().split()
@@ -121,10 +120,9 @@ async def give_subscription_by_text(message: Message):
     await add_subscription(target_id, days)
     await message.answer(f"✅ Подписка на {days} дней выдана пользователю {target_id}.")
 
-# ---------- ЗАГРУЗКА ЛЮБЫХ ФАЙЛОВ (владелец) – ЛОВИТ ВСЁ НЕТЕКСТОВОЕ ----------
+# ---------- ЗАГРУЗКА ФАЙЛОВ (владелец, любые вложения) ----------
 @router.message(F.from_user.id == OWNER_ID, ~F.text)
 async def handle_admin_any_file(message: Message, bot: Bot):
-    # Определяем тип контента и сохраняем
     if message.document:
         file_id = message.document.file_id
         file_name = message.document.file_name or "документ"
@@ -151,7 +149,6 @@ async def handle_admin_any_file(message: Message, bot: Bot):
         file_name = "видеокружок.mp4"
     else:
         return await message.answer("❌ Неподдерживаемый тип вложения.")
-    
     await bot.download(file_id, destination=f"/tmp/{file_name}")
     await message.answer(f"✅ Файл «{file_name}» получен. Импорт запущен (заглушка).")
 
@@ -176,13 +173,14 @@ async def buy_subscription(call: CallbackQuery):
         await call.message.answer(f"⚠️ Ошибка создания счёта: {e}")
     await call.answer()
 
-# ---------- ПОИСК ----------
+# ---------- ПОИСК (ОБЫЧНЫЕ ПОЛЬЗОВАТЕЛИ С ПРОВЕРКОЙ, ВЛАДЕЛЕЦ БЕЗ) ----------
 @router.message(F.text)
 async def handle_search(message: Message, bot: Bot):
     user_id = message.from_user.id
-    # Владелец без ограничений
+    # Владелец: без подписки, без лимита
     if user_id == OWNER_ID:
         query = message.text.strip()
+        # исключаем служебные слова
         if query.lower() in ["админ", "admin", "🔒 админ-панель", "🔍 поиск", "💳 подписка", "ℹ️ помощь"]:
             return
         result = await process_search_query(query, user_id)
@@ -192,10 +190,8 @@ async def handle_search(message: Message, bot: Bot):
     user = await get_user(user_id)
     if not user:
         return await message.answer("❌ Сначала нажмите /start")
-
     if not await is_subscribed_to_channel(bot, user_id, SUBSCRIBE_CHAT_ID):
         return await message.answer("🔒 Необходима подписка на канал.", reply_markup=subscribe_keyboard())
-
     if user.subscribed_until < datetime.utcnow():
         return await message.answer("💳 Подписка истекла. Продлите: /plans", reply_markup=plans_keyboard())
 
@@ -212,7 +208,6 @@ async def handle_search(message: Message, bot: Bot):
     query = message.text.strip()
     if query in ["🔍 Поиск", "💳 Подписка", "ℹ️ Помощь"]:
         return
-
     result = await process_search_query(query, user_id)
     user.daily_requests -= 1
     async with async_session() as sess:
