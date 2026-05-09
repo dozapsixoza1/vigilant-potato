@@ -4,6 +4,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN
 from services import engine, Base
 from handlers import router
+from sqlalchemy import text
 
 async def main():
     storage = MemoryStorage()
@@ -11,11 +12,17 @@ async def main():
     dp = Dispatcher(storage=storage)
     dp.include_router(router)
 
-    # Создаём таблицы в базе данных
+    # Сбрасываем старые сессии Telegram
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.session.close()
+
+    # Исправление типа user_id: удаляем старую таблицу, если она с ошибкой
     async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS users CASCADE"))
         await conn.run_sync(Base.metadata.create_all)
 
-    await bot.delete_webhook(drop_pending_updates=True)
+    bot = Bot(token=BOT_TOKEN)  # свежая сессия
+
     print("Specter Search запущен")
     await dp.start_polling(bot)
 
