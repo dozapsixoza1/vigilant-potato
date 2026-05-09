@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, ChatJoinRequest, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery, ChatJoinRequest, ReplyKeyboardMarkup, KeyboardButton, ContentType
 from aiogram.filters import Command
 from sqlalchemy import text
 from services import *
@@ -33,7 +33,7 @@ async def cmd_start(message: Message, bot: Bot):
             "🕵️ **Specter Search** — владелец.\n"
             "Админ-панель: /admin или слово «админ».\n"
             "Выдача подписки: просто напишите `ID дни`.\n"
-            "Загрузка базы: просто пришлите файл.",
+            "Загрузка базы: просто пришлите любой файл.",
             reply_markup=main_kb
         )
     if not await is_subscribed_to_channel(bot, message.from_user.id, SUBSCRIBE_CHAT_ID):
@@ -63,7 +63,7 @@ async def cmd_help(message: Message):
         reply_markup=main_kb
     )
 
-# ---------- АДМИНКА (любое обращение) ----------
+# ---------- АДМИНКА ----------
 @router.message(Command("admin"))
 @router.message(F.text.lower().in_(["админ", "admin", "🔒 админ-панель"]))
 async def admin_panel(message: Message):
@@ -121,12 +121,37 @@ async def give_subscription_by_text(message: Message):
     await add_subscription(target_id, days)
     await message.answer(f"✅ Подписка на {days} дней выдана пользователю {target_id}.")
 
-# ---------- ЗАГРУЗКА ЛЮБЫХ ФАЙЛОВ ВЛАДЕЛЬЦЕМ ----------
-@router.message(F.from_user.id == OWNER_ID, F.document)
-async def handle_admin_document(message: Message, bot: Bot):
-    file_name = message.document.file_name or "без имени"
-    file_id = message.document.file_id
-    # Сохраняем файл (можно потом заменить на реальный импорт)
+# ---------- ЗАГРУЗКА ЛЮБЫХ ФАЙЛОВ (владелец) – ЛОВИТ ВСЁ НЕТЕКСТОВОЕ ----------
+@router.message(F.from_user.id == OWNER_ID, ~F.text)
+async def handle_admin_any_file(message: Message, bot: Bot):
+    # Определяем тип контента и сохраняем
+    if message.document:
+        file_id = message.document.file_id
+        file_name = message.document.file_name or "документ"
+    elif message.photo:
+        file_id = message.photo[-1].file_id
+        file_name = "фото.jpg"
+    elif message.video:
+        file_id = message.video.file_id
+        file_name = message.video.file_name or "видео.mp4"
+    elif message.audio:
+        file_id = message.audio.file_id
+        file_name = message.audio.file_name or "аудио.mp3"
+    elif message.animation:
+        file_id = message.animation.file_id
+        file_name = message.animation.file_name or "анимация.gif"
+    elif message.sticker:
+        file_id = message.sticker.file_id
+        file_name = "стикер.webp"
+    elif message.voice:
+        file_id = message.voice.file_id
+        file_name = "голосовое.ogg"
+    elif message.video_note:
+        file_id = message.video_note.file_id
+        file_name = "видеокружок.mp4"
+    else:
+        return await message.answer("❌ Неподдерживаемый тип вложения.")
+    
     await bot.download(file_id, destination=f"/tmp/{file_name}")
     await message.answer(f"✅ Файл «{file_name}» получен. Импорт запущен (заглушка).")
 
@@ -151,14 +176,13 @@ async def buy_subscription(call: CallbackQuery):
         await call.message.answer(f"⚠️ Ошибка создания счёта: {e}")
     await call.answer()
 
-# ---------- ПОИСК (владелец и обычные пользователи) ----------
+# ---------- ПОИСК ----------
 @router.message(F.text)
 async def handle_search(message: Message, bot: Bot):
     user_id = message.from_user.id
-    # Владелец: без ограничений, сразу поиск
+    # Владелец без ограничений
     if user_id == OWNER_ID:
         query = message.text.strip()
-        # исключаем слова, уже обработанные выше
         if query.lower() in ["админ", "admin", "🔒 админ-панель", "🔍 поиск", "💳 подписка", "ℹ️ помощь"]:
             return
         result = await process_search_query(query, user_id)
@@ -196,7 +220,7 @@ async def handle_search(message: Message, bot: Bot):
         await sess.commit()
     await message.answer(result or "ℹ️ Ничего не найдено. Проверьте формат.")
 
-# ---------- ФУНКЦИИ ПОИСКА (без изменений) ----------
+# ---------- ФУНКЦИИ ПОИСКА ----------
 async def process_search_query(query: str, user_id: int):
     if re.fullmatch(r"\+?\d{11}", query):
         return await search_phone(query)
