@@ -1,10 +1,8 @@
 import re
 from datetime import datetime
-from aiogram import Router, F, Bot, Dispatcher
+from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, ChatJoinRequest, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command, StateFilter
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
+from aiogram.filters import Command
 from sqlalchemy import text
 from services import *
 from keyboards import *
@@ -21,10 +19,6 @@ main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ---------- ГРУППА СОСТОЯНИЙ ДЛЯ ВЫДАЧИ ПОДПИСКИ ----------
-class AdminGiveSub(StatesGroup):
-    waiting_for_id_days = State()
-
 # ---------- АВТООДОБРЕНИЕ ЗАЯВОК ----------
 @router.chat_join_request(F.chat.id == SUBSCRIBE_CHAT_ID)
 async def handle_join_request(update: ChatJoinRequest):
@@ -36,7 +30,10 @@ async def cmd_start(message: Message, bot: Bot):
     user = await create_user_if_not(message.from_user.id, message.from_user.username)
     if message.from_user.id == OWNER_ID:
         return await message.answer(
-            "🕵️ **Specter Search** — владелец. Админ-панель: /admin или слово «админ»",
+            "🕵️ **Specter Search** — владелец.\n"
+            "Админ-панель: /admin или слово «админ».\n"
+            "Выдача подписки: просто напишите `ID дни`.\n"
+            "Загрузка базы: просто пришлите файл.",
             reply_markup=main_kb
         )
     if not await is_subscribed_to_channel(bot, message.from_user.id, SUBSCRIBE_CHAT_ID):
@@ -69,11 +66,9 @@ async def cmd_help(message: Message):
 # ---------- АДМИНКА (любое обращение) ----------
 @router.message(Command("admin"))
 @router.message(F.text.lower().in_(["админ", "admin", "🔒 админ-панель"]))
-async def admin_panel(message: Message, state: FSMContext = None):
+async def admin_panel(message: Message):
     if message.from_user.id != OWNER_ID:
         return await message.answer("⛔ Доступ запрещён.")
-    if state:
-        await state.clear()
     await message.answer("🔒 Админ-панель Specter Search", reply_markup=admin_menu())
 
 # ---------- ОБРАБОТЧИКИ КНОПОК АДМИНКИ ----------
@@ -89,24 +84,20 @@ async def admin_stats(call: CallbackQuery):
     )
 
 @router.callback_query(F.data == "admin_subs")
-async def admin_subs(call: CallbackQuery, state: FSMContext):
-    await state.set_state(AdminGiveSub.waiting_for_id_days)
+async def admin_subs(call: CallbackQuery):
     await call.message.edit_text(
-        "Введите Telegram ID пользователя и количество дней через пробел.\nПример: `7950038145 30`",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_back")]
-        ])
+        "Введите Telegram ID пользователя и количество дней через пробел.\n"
+        "Пример: `7950038145 30`\n"
+        "Или просто напишите это сообщением, если вы владелец.",
+        reply_markup=admin_menu()
     )
-
-@router.callback_query(F.data == "admin_back")
-async def admin_back(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.message.edit_text("🔒 Админ-панель", reply_markup=admin_menu())
 
 @router.callback_query(F.data == "admin_upload")
 async def admin_upload_prompt(call: CallbackQuery):
     await call.message.edit_text(
-        "📁 Просто перешлите любой файл (базу) прямо сюда.\nПоддерживаются любые форматы: .csv, .json, .7z, .rar, .zip, .001 и т.д.\nБот сам заберёт и запустит импорт.",
+        "📁 Просто перешлите любой файл (базу) сюда.\n"
+        "Поддерживаются все форматы: .csv, .json, .7z, .rar, .zip, .001 и т.д.\n"
+        "Бот примет и запустит импорт.",
         reply_markup=admin_menu()
     )
 
@@ -121,56 +112,23 @@ async def admin_add(call: CallbackQuery):
 async def close_callback(call: CallbackQuery):
     await call.message.delete()
 
-# ---------- ОБРАБОТЧИК СОСТОЯНИЯ ВЫДАЧИ ПОДПИСКИ (ожидание ID и дней) ----------
-@router.message(StateFilter(AdminGiveSub.waiting_for_id_days), F.text)
-async def process_give_sub(message: Message, state: FSMContext):
-    if message.from_user.id != OWNER_ID:
-        await state.clear()
-        return
+# ---------- ВЫДАЧА ПОДПИСКИ ВЛАДЕЛЬЦУ (просто ID дни) ----------
+@router.message(F.from_user.id == OWNER_ID, F.text.regexp(r'^\d+\s+\d+$'))
+async def give_subscription_by_text(message: Message):
     parts = message.text.strip().split()
-    if len(parts) != 2:
-        return await message.answer("❌ Неверный формат. Введите: ID дни")
-    try:
-        target_id = int(parts[0])
-        days = int(parts[1])
-    except ValueError:
-        return await message.answer("❌ ID и дни должны быть числами.")
+    target_id = int(parts[0])
+    days = int(parts[1])
     await add_subscription(target_id, days)
     await message.answer(f"✅ Подписка на {days} дней выдана пользователю {target_id}.")
-    await state.clear()
 
-# ---------- ЗАГРУЗКА ФАЙЛОВ ОТ АДМИНА (любой тип) ----------
-@router.message(F.from_user.id == OWNER_ID, F.document | F.photo | F.video | F.audio | F.animation | F.sticker)
-async def handle_admin_any_file(message: Message, bot: Bot):
-    # Принимаем любой медиафайл как потенциальную базу
-    # Показываем, что файл получен и начинаем импорт (просто уведомление, без реальной обработки)
-    file_id = None
-    file_name = "unknown"
-    if message.document:
-        file_id = message.document.file_id
-        file_name = message.document.file_name or file_name
-    elif message.photo:
-        file_id = message.photo[-1].file_id
-        file_name = "photo.jpg"
-    elif message.video:
-        file_id = message.video.file_id
-        file_name = message.video.file_name or "video.mp4"
-    elif message.audio:
-        file_id = message.audio.file_id
-        file_name = message.audio.file_name or "audio.mp3"
-    elif message.animation:
-        file_id = message.animation.file_id
-        file_name = message.animation.file_name or "animation.gif"
-    elif message.sticker:
-        file_id = message.sticker.file_id
-        file_name = "sticker.webp"
-
-    # Просто скачиваем (можно для демонстрации сохранить во временный файл)
-    if file_id:
-        await bot.download(file_id, destination=f"/tmp/{file_name}")
-        await message.answer(f"✅ Файл «{file_name}» получен. Импорт запущен (заглушка).")
-    else:
-        await message.answer("❌ Не удалось получить файл.")
+# ---------- ЗАГРУЗКА ЛЮБЫХ ФАЙЛОВ ВЛАДЕЛЬЦЕМ ----------
+@router.message(F.from_user.id == OWNER_ID, F.document)
+async def handle_admin_document(message: Message, bot: Bot):
+    file_name = message.document.file_name or "без имени"
+    file_id = message.document.file_id
+    # Сохраняем файл (можно потом заменить на реальный импорт)
+    await bot.download(file_id, destination=f"/tmp/{file_name}")
+    await message.answer(f"✅ Файл «{file_name}» получен. Импорт запущен (заглушка).")
 
 # ---------- ПЛАНЫ И ПОКУПКА ----------
 @router.message(Command("plans"))
@@ -193,15 +151,16 @@ async def buy_subscription(call: CallbackQuery):
         await call.message.answer(f"⚠️ Ошибка создания счёта: {e}")
     await call.answer()
 
-# ---------- ПОИСК ----------
+# ---------- ПОИСК (владелец и обычные пользователи) ----------
 @router.message(F.text)
 async def handle_search(message: Message, bot: Bot):
     user_id = message.from_user.id
-    # Владелец без ограничений
+    # Владелец: без ограничений, сразу поиск
     if user_id == OWNER_ID:
         query = message.text.strip()
-        if query.lower() in ["админ", "admin", "🔒 админ-панель"]:
-            return  # уже обработано
+        # исключаем слова, уже обработанные выше
+        if query.lower() in ["админ", "admin", "🔒 админ-панель", "🔍 поиск", "💳 подписка", "ℹ️ помощь"]:
+            return
         result = await process_search_query(query, user_id)
         return await message.answer(result or "ℹ️ Ничего не найдено.")
 
@@ -228,7 +187,7 @@ async def handle_search(message: Message, bot: Bot):
 
     query = message.text.strip()
     if query in ["🔍 Поиск", "💳 Подписка", "ℹ️ Помощь"]:
-        return  # кнопки обработаны отдельно
+        return
 
     result = await process_search_query(query, user_id)
     user.daily_requests -= 1
@@ -237,7 +196,7 @@ async def handle_search(message: Message, bot: Bot):
         await sess.commit()
     await message.answer(result or "ℹ️ Ничего не найдено. Проверьте формат.")
 
-# ---------- ФУНКЦИИ ПОИСКА ----------
+# ---------- ФУНКЦИИ ПОИСКА (без изменений) ----------
 async def process_search_query(query: str, user_id: int):
     if re.fullmatch(r"\+?\d{11}", query):
         return await search_phone(query)
