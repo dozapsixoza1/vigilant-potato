@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, JSON, Text
+from sqlalchemy import Column, Integer, BigInteger, String, DateTime, Boolean, JSON, Text, select
 from datetime import datetime, timedelta
 import aiohttp
 from config import DB_URL, CRYPTO_BOT_API
@@ -12,8 +12,8 @@ Base = declarative_base()
 # Модели
 class User(Base):
     __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, unique=True, index=True)
+    id = Column(Integer, primary_key=True)                    # автоинкремент
+    user_id = Column(BigInteger, unique=True, index=True)     # Telegram ID
     username = Column(String)
     subscribed_until = Column(DateTime, default=datetime.utcnow)
     daily_requests = Column(Integer, default=2)
@@ -32,22 +32,30 @@ class Leak(Base):
     data = Column(JSON)       # любые дополнительные данные
 
 # Функции работы с пользователями
-async def get_user(user_id: int):
+async def get_user(telegram_user_id: int):
+    """Ищет пользователя по Telegram user_id, а не по id"""
     async with async_session() as sess:
-        return await sess.get(User, user_id)
+        stmt = select(User).where(User.user_id == telegram_user_id)
+        result = await sess.execute(stmt)
+        return result.scalar()
 
-async def create_user_if_not(user_id, username):
+async def create_user_if_not(telegram_user_id: int, username: str):
+    """Создаёт пользователя, если его ещё нет в базе"""
     async with async_session() as sess:
-        user = await sess.get(User, user_id)
+        stmt = select(User).where(User.user_id == telegram_user_id)
+        result = await sess.execute(stmt)
+        user = result.scalar()
         if not user:
-            user = User(user_id=user_id, username=username)
+            user = User(user_id=telegram_user_id, username=username)
             sess.add(user)
             await sess.commit()
         return user
 
-async def add_subscription(user_id, days):
+async def add_subscription(telegram_user_id: int, days: int):
     async with async_session() as sess:
-        user = await sess.get(User, user_id)
+        stmt = select(User).where(User.user_id == telegram_user_id)
+        result = await sess.execute(stmt)
+        user = result.scalar()
         if not user:
             return
         now = datetime.utcnow()
@@ -66,14 +74,14 @@ async def is_subscribed_to_channel(bot, user_id, chat_id):
         return False
 
 # Интеграция Crypto Bot
-async def create_crypto_invoice(amount_usdt, user_id):
+async def create_crypto_invoice(amount_usdt: float, telegram_user_id: int):
     url = "https://pay.crypt.bot/api/createInvoice"
     headers = {"Crypto-Pay-API-Token": CRYPTO_BOT_API}
     payload = {
         "asset": "USDT",
         "amount": str(amount_usdt),
-        "description": f"Подписка Specter Search для user {user_id}",
-        "payload": {"user_id": user_id},
+        "description": f"Подписка Specter Search для user {telegram_user_id}",
+        "payload": {"user_id": telegram_user_id},
         "allow_comments": False
     }
     async with aiohttp.ClientSession() as session:
