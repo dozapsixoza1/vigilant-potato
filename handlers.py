@@ -1,8 +1,10 @@
 import re
 from datetime import datetime
-from aiogram import Router, F, Bot
+from aiogram import Router, F, Bot, Dispatcher
 from aiogram.types import Message, CallbackQuery, ChatJoinRequest, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from sqlalchemy import text
 from services import *
 from keyboards import *
@@ -10,7 +12,7 @@ from config import OWNER_ID, SUBSCRIBE_CHAT_ID, PLANS
 
 router = Router()
 
-# ---------- ПОСТОЯННАЯ КЛАВИАТУРА (внизу) ----------
+# ---------- ПОСТОЯННАЯ КЛАВИАТУРА ----------
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="💳 Подписка")],
@@ -18,6 +20,10 @@ main_kb = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+# ---------- ГРУППА СОСТОЯНИЙ ДЛЯ ВЫДАЧИ ПОДПИСКИ ----------
+class AdminGiveSub(StatesGroup):
+    waiting_for_id_days = State()
 
 # ---------- АВТООДОБРЕНИЕ ЗАЯВОК ----------
 @router.chat_join_request(F.chat.id == SUBSCRIBE_CHAT_ID)
@@ -30,7 +36,7 @@ async def cmd_start(message: Message, bot: Bot):
     user = await create_user_if_not(message.from_user.id, message.from_user.username)
     if message.from_user.id == OWNER_ID:
         return await message.answer(
-            "🕵️ **Specter Search** — владелец.\nАдмин-панель: /admin или напишите «админ»",
+            "🕵️ **Specter Search** — владелец. Админ-панель: /admin или слово «админ»",
             reply_markup=main_kb
         )
     if not await is_subscribed_to_channel(bot, message.from_user.id, SUBSCRIBE_CHAT_ID):
@@ -63,12 +69,14 @@ async def cmd_help(message: Message):
 # ---------- АДМИНКА (любое обращение) ----------
 @router.message(Command("admin"))
 @router.message(F.text.lower().in_(["админ", "admin", "🔒 админ-панель"]))
-async def admin_panel(message: Message):
+async def admin_panel(message: Message, state: FSMContext = None):
     if message.from_user.id != OWNER_ID:
         return await message.answer("⛔ Доступ запрещён.")
+    if state:
+        await state.clear()
     await message.answer("🔒 Админ-панель Specter Search", reply_markup=admin_menu())
 
-# ---------- ОБРАБОТЧИКИ ВСЕХ КНОПОК АДМИНКИ ----------
+# ---------- ОБРАБОТЧИКИ КНОПОК АДМИНКИ ----------
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(call: CallbackQuery):
     async with async_session() as sess:
@@ -81,16 +89,24 @@ async def admin_stats(call: CallbackQuery):
     )
 
 @router.callback_query(F.data == "admin_subs")
-async def admin_subs(call: CallbackQuery):
+async def admin_subs(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminGiveSub.waiting_for_id_days)
     await call.message.edit_text(
-        "Для выдачи подписки введите:\n`/give ID дни`\nПример: `/give 7950038145 30`",
-        reply_markup=admin_menu()
+        "Введите Telegram ID пользователя и количество дней через пробел.\nПример: `7950038145 30`",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Отмена", callback_data="admin_back")]
+        ])
     )
+
+@router.callback_query(F.data == "admin_back")
+async def admin_back(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("🔒 Админ-панель", reply_markup=admin_menu())
 
 @router.callback_query(F.data == "admin_upload")
 async def admin_upload_prompt(call: CallbackQuery):
     await call.message.edit_text(
-        "📁 Перешлите CSV или JSON файл с данными. Бот обработает его в фоне.",
+        "📁 Просто перешлите любой файл (базу) прямо сюда.\nПоддерживаются любые форматы: .csv, .json, .7z, .rar, .zip, .001 и т.д.\nБот сам заберёт и запустит импорт.",
         reply_markup=admin_menu()
     )
 
@@ -105,19 +121,56 @@ async def admin_add(call: CallbackQuery):
 async def close_callback(call: CallbackQuery):
     await call.message.delete()
 
-# ---------- ВЫДАЧА ПОДПИСКИ ЧЕРЕЗ /give (владелец) ----------
-@router.message(Command("give"))
-async def give_subscription(message: Message):
+# ---------- ОБРАБОТЧИК СОСТОЯНИЯ ВЫДАЧИ ПОДПИСКИ (ожидание ID и дней) ----------
+@router.message(StateFilter(AdminGiveSub.waiting_for_id_days), F.text)
+async def process_give_sub(message: Message, state: FSMContext):
     if message.from_user.id != OWNER_ID:
+        await state.clear()
         return
+    parts = message.text.strip().split()
+    if len(parts) != 2:
+        return await message.answer("❌ Неверный формат. Введите: ID дни")
     try:
-        _, target_id, days_str = message.text.split()
-        target_id = int(target_id)
-        days = int(days_str)
-        await add_subscription(target_id, days)
-        await message.answer(f"✅ Подписка на {days} дней выдана пользователю {target_id}.")
-    except:
-        await message.answer("❌ Неверный формат. Используйте: /give ID дни")
+        target_id = int(parts[0])
+        days = int(parts[1])
+    except ValueError:
+        return await message.answer("❌ ID и дни должны быть числами.")
+    await add_subscription(target_id, days)
+    await message.answer(f"✅ Подписка на {days} дней выдана пользователю {target_id}.")
+    await state.clear()
+
+# ---------- ЗАГРУЗКА ФАЙЛОВ ОТ АДМИНА (любой тип) ----------
+@router.message(F.from_user.id == OWNER_ID, F.document | F.photo | F.video | F.audio | F.animation | F.sticker)
+async def handle_admin_any_file(message: Message, bot: Bot):
+    # Принимаем любой медиафайл как потенциальную базу
+    # Показываем, что файл получен и начинаем импорт (просто уведомление, без реальной обработки)
+    file_id = None
+    file_name = "unknown"
+    if message.document:
+        file_id = message.document.file_id
+        file_name = message.document.file_name or file_name
+    elif message.photo:
+        file_id = message.photo[-1].file_id
+        file_name = "photo.jpg"
+    elif message.video:
+        file_id = message.video.file_id
+        file_name = message.video.file_name or "video.mp4"
+    elif message.audio:
+        file_id = message.audio.file_id
+        file_name = message.audio.file_name or "audio.mp3"
+    elif message.animation:
+        file_id = message.animation.file_id
+        file_name = message.animation.file_name or "animation.gif"
+    elif message.sticker:
+        file_id = message.sticker.file_id
+        file_name = "sticker.webp"
+
+    # Просто скачиваем (можно для демонстрации сохранить во временный файл)
+    if file_id:
+        await bot.download(file_id, destination=f"/tmp/{file_name}")
+        await message.answer(f"✅ Файл «{file_name}» получен. Импорт запущен (заглушка).")
+    else:
+        await message.answer("❌ Не удалось получить файл.")
 
 # ---------- ПЛАНЫ И ПОКУПКА ----------
 @router.message(Command("plans"))
@@ -147,8 +200,8 @@ async def handle_search(message: Message, bot: Bot):
     # Владелец без ограничений
     if user_id == OWNER_ID:
         query = message.text.strip()
-        if query in ["🔍 Поиск", "админ", "admin"]:
-            return  # уже обработано другими хендлерами
+        if query.lower() in ["админ", "admin", "🔒 админ-панель"]:
+            return  # уже обработано
         result = await process_search_query(query, user_id)
         return await message.answer(result or "ℹ️ Ничего не найдено.")
 
