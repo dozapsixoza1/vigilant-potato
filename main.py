@@ -5,14 +5,16 @@ from config import BOT_TOKEN
 from services import engine, Base
 from handlers import router
 
-bot = Bot(token=BOT_TOKEN)  # глобальный объект
+bot = Bot(token=BOT_TOKEN)   # глобальный объект, нужен для импорта
 
 async def main():
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
     dp.include_router(router)
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
     await bot.delete_webhook(drop_pending_updates=True)
     print("Specter Search запущен")
     await dp.start_polling(bot)
