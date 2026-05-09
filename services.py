@@ -9,11 +9,10 @@ engine = create_async_engine(DB_URL)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
-# ---------- МОДЕЛИ ----------
 class User(Base):
     __tablename__ = "users"
-    id = Column(Integer, primary_key=True)                    # автоинкремент
-    user_id = Column(BigInteger, unique=True, index=True)     # Telegram ID
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, unique=True, index=True)
     username = Column(String)
     subscribed_until = Column(DateTime, default=datetime.utcnow)
     daily_requests = Column(Integer, default=2)
@@ -29,18 +28,15 @@ class Leak(Base):
     username = Column(String, index=True)
     car_plate = Column(String, index=True)
     vin = Column(String, index=True)
-    data = Column(JSON)       # любые дополнительные данные
+    data = Column(JSON)
 
-# ---------- ФУНКЦИИ РАБОТЫ С ПОЛЬЗОВАТЕЛЯМИ ----------
 async def get_user(telegram_user_id: int):
-    """Ищет пользователя по Telegram user_id"""
     async with async_session() as sess:
         stmt = select(User).where(User.user_id == telegram_user_id)
         result = await sess.execute(stmt)
         return result.scalar()
 
 async def create_user_if_not(telegram_user_id: int, username: str):
-    """Создаёт пользователя, если его ещё нет в базе"""
     async with async_session() as sess:
         stmt = select(User).where(User.user_id == telegram_user_id)
         result = await sess.execute(stmt)
@@ -65,7 +61,6 @@ async def add_subscription(telegram_user_id: int, days: int):
             user.subscribed_until += timedelta(days=days)
         await sess.commit()
 
-# ---------- ПРОВЕРКА ПОДПИСКИ НА КАНАЛ ----------
 async def is_subscribed_to_channel(bot, user_id, chat_id):
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -73,7 +68,7 @@ async def is_subscribed_to_channel(bot, user_id, chat_id):
     except:
         return False
 
-# ---------- ИНТЕГРАЦИЯ CRYPTO BOT (исправлено) ----------
+# Crypto Bot – исправленная функция со всеми заголовками и обработкой ошибок
 async def create_crypto_invoice(amount_usdt: float, telegram_user_id: int):
     url = "https://pay.crypt.bot/api/createInvoice"
     headers = {"Crypto-Pay-API-Token": CRYPTO_BOT_API}
@@ -81,7 +76,7 @@ async def create_crypto_invoice(amount_usdt: float, telegram_user_id: int):
         "asset": "USDT",
         "amount": str(amount_usdt),
         "description": f"Подписка Specter Search для user {telegram_user_id}",
-        "payload": str({"user_id": telegram_user_id}),   # обязательно строка!
+        "payload": str({"user_id": telegram_user_id}),
         "allow_comments": False
     }
     async with aiohttp.ClientSession() as session:
@@ -90,4 +85,5 @@ async def create_crypto_invoice(amount_usdt: float, telegram_user_id: int):
             if data.get("ok"):
                 return data["result"]["bot_invoice_url"]
             else:
-                raise Exception(f"Crypto Bot: {data.get('error', 'неизвестная ошибка')}")
+                error_text = data.get("error", "неизвестная ошибка")
+                raise Exception(f"Crypto Bot API error: {error_text}")
